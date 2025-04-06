@@ -300,12 +300,13 @@ export default function LibraryScreen() {
       }
       
       if (replaceQueue) {
-        // Clear the current queue and add the new songs
-        clearQueueFromStore();
+        // Clear the current queue first and wait for it to complete
+        await clearQueueFromStore();
       }
       
       if (newQueue.length > 0) {
-        addToQueueFromStore(newQueue);
+        // Then add the new songs to the empty queue
+        await addToQueueFromStore(newQueue);
       }
       
       // Play the selected song

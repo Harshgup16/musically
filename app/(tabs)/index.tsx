@@ -305,11 +305,11 @@ export default function SongList() {
       setIsPlaying(true);
       
       if (replaceQueue) {
-        // Clear the queue first
-        clearQueueFromStore();
+        // Clear the queue first and wait for it to complete
+        await clearQueueFromStore();
         
         // Add only the selected song
-        addToQueueFromStore([song]);
+        await addToQueueFromStore([song]);
         setCurrentPlaylistIdFromStore(null);
       }
       
