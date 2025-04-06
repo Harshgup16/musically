@@ -35,6 +35,7 @@ import {
   FolderPlus,
   ChevronRight,
   X,
+  MoreHorizontal,
 } from 'lucide-react-native';
 import { supabase, Song } from '@/lib/supabase';
 import { Audio, AVPlaybackStatus } from 'expo-av';
@@ -60,7 +61,7 @@ export default function SongList() {
   const [hasMoreSongs, setHasMoreSongs] = useState(true);
   const [page, setPage] = useState(1);
   const [totalSongs, setTotalSongs] = useState(0);
-  const pageSize = 20; // Number of songs to load per page
+  const pageSize = 10; // Number of songs to load per page
   const [showQueue, setShowQueue] = useState(false);
   const [showPlaylistModal, setShowPlaylistModal] = useState(false);
   const [selectedSong, setSelectedSong] = useState<Song | null>(null);
@@ -72,6 +73,7 @@ export default function SongList() {
   const titleScrollAnim = useRef(new Animated.Value(0)).current;
   const [titleWidths, setTitleWidths] = useState<{ [key: string]: number }>({});
   const [localQueue, setLocalQueue] = useState<Song[]>([]);
+  const [songMenuOpen, setSongMenuOpen] = useState<string | null>(null);
   const { 
     downloadedSongs, 
     favoriteSongs, 
@@ -103,6 +105,9 @@ export default function SongList() {
   } = useAppContext();
   const [activeTab, setActiveTab] = useState<'all' | 'favorites' | 'downloads'>('all');
   const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null);
+  const [hoveredItem, setHoveredItem] = useState<string | null>(null);
+  const tooltipTimeout = useRef<NodeJS.Timeout | null>(null);
+  const [menuAnimation] = useState(new Animated.Value(0));
 
   // Use the player store
   const { 
@@ -198,36 +203,77 @@ export default function SongList() {
     }
   }, [queueFromStore]);
 
-  const fetchSongs = async () => {
+  const fetchSongs = async (pageNum = 1, pageSizeParam = pageSize) => {
     try {
-      setIsLoading(true);
+      if (pageNum === 1) {
+        setIsLoading(true);
+      } else {
+        setIsLoadingMore(true);
+      }
       
-      const { data, error } = await supabase
+      // Calculate range for pagination
+      const startIndex = (pageNum - 1) * pageSizeParam;
+      
+      // First check if we already know the total and if we're trying to load beyond it
+      if (totalSongs > 0 && startIndex >= totalSongs) {
+        setHasMoreSongs(false);
+        setIsLoadingMore(false);
+        return { songs: [], total: totalSongs };
+      }
+      
+      const { data, error, count } = await supabase
         .from('songlist_db')
-        .select('*')
-        .order('created_at', { ascending: true });
+        .select('*', { count: 'exact' })
+        .order('created_at', { ascending: true })
+        .range(startIndex, startIndex + pageSizeParam - 1);
 
       if (error) {
+        // Check if it's a range error
+        if (error.code === 'PGRST103') {
+          console.log('No more songs available');
+          setHasMoreSongs(false);
+          return { songs: [], total: totalSongs || startIndex };
+        }
+        
         console.error('Error fetching songs:', error);
         setError('Failed to load songs. Please try again later.');
-        return;
+        return { songs: [], total: 0 };
       }
 
       if (!data || data.length === 0) {
-        setError('No songs found in your library.');
-        return;
+        if (pageNum === 1) {
+          setError('No songs found in your library.');
+        }
+        setHasMoreSongs(false);
+        return { songs: [], total: 0 };
       }
 
-      setSongs(data);
-      setCurrentSong(data[0]);
-      setError(null);
-      setTotalSongs(data.length);
-      setHasMoreSongs(false); // Since we're loading all songs at once
+      if (pageNum === 1) {
+        setSongs(data);
+        if (data.length > 0 && !currentSongFromPlayer) {
+          setCurrentSong(data[0]);
+        }
+        setError(null);
+      } else {
+        setSongs(prevSongs => [...prevSongs, ...data]);
+      }
+
+      if (count !== null && count !== undefined) {
+        setTotalSongs(count);
+        setHasMoreSongs(startIndex + data.length < count);
+      } else {
+        // If data length is less than page size, we know we've reached the end
+        setHasMoreSongs(data.length >= pageSizeParam);
+      }
+      
+      return { songs: data, total: count || data.length };
     } catch (error) {
       console.error('Error in fetchSongs:', error);
       setError('An unexpected error occurred. Please try again later.');
+      return { songs: [], total: 0 };
     } finally {
       setIsLoading(false);
+      setIsLoadingMore(false);
     }
   };
 
@@ -279,6 +325,9 @@ export default function SongList() {
 
   const handlePlayPause = async (song: Song, replaceQueue: boolean = true) => {
     if (isChangingSong) return;
+    
+    // Close any open song menu
+    setSongMenuOpen(null);
     
     // If it's the current song, just toggle play/pause immediately without waiting
     if (currentSongFromPlayer?.id === song.id) {
@@ -372,89 +421,228 @@ export default function SongList() {
     return queueFromStore.some(song => song.id === songId);
   };
 
+  const toggleSongMenu = (songId: string) => {
+    // If clicking the same song's menu button, toggle it
+    if (songMenuOpen === songId) {
+      Animated.timing(menuAnimation, {
+        toValue: 0,
+        duration: 150,
+        useNativeDriver: true,
+      }).start(() => {
+        setSongMenuOpen(null);
+      });
+    } else {
+      // Otherwise, open this song's menu and close any other
+      setSongMenuOpen(songId);
+      menuAnimation.setValue(0);
+      Animated.timing(menuAnimation, {
+        toValue: 1,
+        duration: 200,
+        useNativeDriver: true,
+        easing: Easing.out(Easing.cubic),
+      }).start();
+    }
+  };
+
+  const handlePressIn = (id: string) => {
+    // Clear any existing timeout
+    if (tooltipTimeout.current) {
+      clearTimeout(tooltipTimeout.current);
+    }
+    
+    // Set a timeout to show the tooltip after 500ms of continuous press
+    tooltipTimeout.current = setTimeout(() => {
+      setHoveredItem(id);
+    }, 500);
+  };
+
+  const handlePressOut = () => {
+    // Clear the timeout if press is released
+    if (tooltipTimeout.current) {
+      clearTimeout(tooltipTimeout.current);
+      tooltipTimeout.current = null;
+    }
+    
+    // Hide the tooltip
+    setHoveredItem(null);
+  };
+
   const renderSong = ({ item }: { item: Song }) => (
-    <TouchableOpacity 
-      style={[
-        styles.songItem,
-        currentSongFromPlayer?.id === item.id && styles.activeSong,
-      ]}
-      onPress={() => handlePlayPause(item, true)}>
-      <View style={styles.songContent}>
-        <Image source={{ uri: item.cover_url }} style={styles.cover} />
-        <View style={styles.songInfo}>
-          <View style={styles.titleContainer}>
-            <Animated.Text 
+    <>
+      <TouchableOpacity 
+        style={[
+          styles.songItem,
+          currentSongFromPlayer?.id === item.id && styles.activeSong,
+        ]}
+        onPress={() => handlePlayPause(item, true)}
+        onPressIn={() => handlePressIn(item.id)}
+        onPressOut={handlePressOut}>
+        <View style={styles.songContent}>
+          <Image source={{ uri: item.cover_url }} style={[
+            styles.cover,
+            currentSongFromPlayer?.id === item.id && styles.activeCover
+          ]} />
+          <View style={styles.songInfo}>
+            <View style={styles.titleContainer}>
+              <Animated.Text 
+                style={[
+                  styles.title,
+                  currentSongFromPlayer?.id === item.id && styles.activeTitle,
+                  {
+                    transform: [{
+                      translateX: titleScrollAnim.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [0, -(titleWidths[item.id] || 0)],
+                      })
+                    }]
+                  }
+                ]}
+                onTextLayout={(event) => {
+                  const { lines } = event.nativeEvent;
+                  if (lines && lines.length > 0) {
+                    const textWidth = lines[0].width;
+                    setTitleWidths(prev => ({
+                      ...prev,
+                      [item.id]: textWidth
+                    }));
+                  }
+                }}>
+                {item.title}
+              </Animated.Text>
+            </View>
+            <Text 
               style={[
-                styles.title,
-                {
-                  transform: [{
-                    translateX: titleScrollAnim.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [0, -(titleWidths[item.id] || 0)],
-                    })
-                  }]
-                }
-              ]}
-              onTextLayout={(event) => {
-                const { lines } = event.nativeEvent;
-                if (lines && lines.length > 0) {
-                  const textWidth = lines[0].width;
-                  setTitleWidths(prev => ({
-                    ...prev,
-                    [item.id]: textWidth
-                  }));
-                }
-              }}>
-              {item.title}
-            </Animated.Text>
+                styles.artist, 
+                currentSongFromPlayer?.id === item.id && styles.activeArtist
+              ]} 
+              numberOfLines={1}>
+              {item.artist}
+            </Text>
           </View>
-          <Text style={styles.artist} numberOfLines={1}>{item.artist}</Text>
+        
+          <View style={styles.songActions}>
+            <TouchableOpacity 
+              style={styles.actionButton} 
+              onPress={() => toggleFavorite(item)}>
+              <Heart 
+                size={20} 
+                color={isSongFavorite(item.id) ? '#FFA500' : '#b3b3b3'} 
+                fill={isSongFavorite(item.id) ? '#FFA500' : 'none'} 
+              />
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={[
+                styles.actionButton,
+                songMenuOpen === item.id && styles.actionButtonActive
+              ]} 
+              onPress={() => toggleSongMenu(item.id)}>
+              <MoreHorizontal 
+                size={22} 
+                color={songMenuOpen === item.id ? '#1DB954' : '#ffffff'} 
+              />
+            </TouchableOpacity>
+          </View>
         </View>
-      </View>
-      <View style={styles.songActions}>
-        <TouchableOpacity 
-          style={styles.actionButton} 
-          onPress={() => toggleFavorite(item)}>
-          <Heart 
-            size={16} 
-            color={isSongFavorite(item.id) ? '#FFA500' : '#b3b3b3'} 
-            fill={isSongFavorite(item.id) ? '#FFA500' : 'none'} 
-          />
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={styles.actionButton} 
-          onPress={() => isSongDownloaded(item.id) ? removeFromDownloads(item.id) : downloadSong(item)}>
-          <Download 
-            size={16} 
-            color={isSongDownloaded(item.id) ? '#1DB954' : '#b3b3b3'} 
-          />
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={styles.actionButton} 
-          onPress={() => handleAddToPlaylist(item)}>
-          <ListMusic size={16} color="#1DB954" />
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={[
-            styles.actionButton,
-            isInQueue(item.id) && styles.queueButtonActive
-          ]} 
-          onPress={() => handleQueueToggle(item)}>
-          {isInQueue(item.id) ? (
-            <Minus size={20} color="#FF4444" />
-          ) : (
-            <Plus size={24} color="#fff" />
-          )}
-        </TouchableOpacity>
-      </View>
-      {currentSongFromPlayer?.id === item.id && (
-        <View style={styles.playingIndicator}>
-          <View style={styles.playingDot} />
-          <View style={styles.playingDot} />
-          <View style={styles.playingDot} />
-        </View>
-      )}
-    </TouchableOpacity>
+
+        {songMenuOpen === item.id && (
+          <>
+            <TouchableOpacity 
+              style={styles.menuBackdrop}
+              activeOpacity={0}
+              onPress={() => toggleSongMenu(item.id)}
+            />
+            <Animated.View 
+              style={[
+                styles.expandedMenu,
+                {
+                  opacity: menuAnimation,
+                  transform: [
+                    {
+                      translateX: menuAnimation.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [20, 0],
+                      }),
+                    },
+                  ],
+                },
+              ]}>
+              
+              {/* Download button */}
+              <TouchableOpacity 
+                style={styles.menuItem} 
+                onPress={() => {
+                  toggleSongMenu(item.id);
+                  isSongDownloaded(item.id) ? removeFromDownloads(item.id) : downloadSong(item);
+                }}
+                onPressIn={() => handlePressIn('download-' + item.id)}
+                onPressOut={handlePressOut}>
+                <Download 
+                  size={20} 
+                  color={isSongDownloaded(item.id) ? '#1DB954' : '#b3b3b3'} 
+                />
+                {hoveredItem === 'download-' + item.id && (
+                  <View style={styles.tooltip}>
+                    <Text style={styles.tooltipText}>
+                      {isSongDownloaded(item.id) ? 'Remove Download' : 'Download'}
+                    </Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+              
+              {/* Playlist button */}
+              <TouchableOpacity 
+                style={styles.menuItem} 
+                onPress={() => {
+                  toggleSongMenu(item.id);
+                  handleAddToPlaylist(item);
+                }}
+                onPressIn={() => handlePressIn('playlist-' + item.id)}
+                onPressOut={handlePressOut}>
+                <ListMusic size={20} color="#1DB954" />
+                {hoveredItem === 'playlist-' + item.id && (
+                  <View style={styles.tooltip}>
+                    <Text style={styles.tooltipText}>Add to Playlist</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+              
+              {/* Queue button */}
+              <TouchableOpacity 
+                style={styles.menuItem} 
+                onPress={() => {
+                  toggleSongMenu(item.id);
+                  handleQueueToggle(item);
+                }}
+                onPressIn={() => handlePressIn('queue-' + item.id)}
+                onPressOut={handlePressOut}>
+                {isInQueue(item.id) ? (
+                  <Minus size={20} color="#FF4444" />
+                ) : (
+                  <Plus size={20} color="#1DB954" />
+                )}
+                {hoveredItem === 'queue-' + item.id && (
+                  <View style={styles.tooltip}>
+                    <Text style={styles.tooltipText}>
+                      {isInQueue(item.id) ? 'Remove from Queue' : 'Add to Queue'}
+                    </Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            </Animated.View>
+          </>
+        )}
+
+        {/* {currentSongFromPlayer?.id === item.id && (
+          <View style={styles.playingIndicator}>
+            <View style={styles.playingDot} />
+            <View style={styles.playingDot} />
+            <View style={styles.playingDot} />
+          </View>
+        )} */}
+      </TouchableOpacity>
+      <View style={styles.divider} />
+    </>
   );
 
   const renderPlaylistItem = ({ item }: { item: Playlist }) => {
@@ -581,6 +769,32 @@ export default function SongList() {
     Alert.alert("Added to Queue", `"${song.title}" has been added to the queue.`);
   };
 
+  // Function to load more songs when user scrolls to the bottom
+  const loadMoreSongs = async () => {
+    if (isLoadingMore || !hasMoreSongs) return;
+    
+    try {
+      setIsLoadingMore(true);
+      
+      // Increment page and fetch more songs
+      const nextPage = page + 1;
+      setPage(nextPage);
+      
+      // Fetch the next page of songs
+      await fetchSongs(nextPage, pageSize);
+    } catch (error) {
+      console.error('Error loading more songs:', error);
+      setHasMoreSongs(false);
+    }
+  };
+
+  // Add function to handle scroll and close menu when scrolling
+  const handleScroll = () => {
+    if (songMenuOpen) {
+      setSongMenuOpen(null);
+    }
+  };
+
   if (error) {
     return (
       <View style={styles.container}>
@@ -597,7 +811,7 @@ export default function SongList() {
         <View style={styles.headerLeft}>
         <Image
             source={{ uri: 'https://api.dicebear.com/7.x/avataaars/svg?seed=user' }} 
-            style={styles.avatar} 
+            style={styles.avatar}
         />
           <Text style={styles.headerTitle}>Your Library</Text>
         </View>
@@ -608,12 +822,29 @@ export default function SongList() {
         renderItem={renderSong}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.list}
+        onEndReached={loadMoreSongs}
+        onEndReachedThreshold={0.5}
+        onScroll={handleScroll}
+        showsVerticalScrollIndicator={false}
+        ListHeaderComponent={<View style={styles.listHeader} />}
+        ListFooterComponent={
+          isLoadingMore ? (
+            <View style={styles.loadingMoreContainer}>
+              <ActivityIndicator size="small" color="#1DB954" />
+              <Text style={styles.loadingMoreText}>Loading more songs...</Text>
+            </View>
+          ) : !hasMoreSongs && songs.length > 0 ? (
+            <View style={styles.endOfListContainer}>
+              <Text style={styles.endOfListText}>No more songs to load</Text>
+            </View>
+          ) : null
+        }
         ListEmptyComponent={
           isLoading ? (
             <View style={styles.loadingContainer}>
               <ActivityIndicator size="large" color="#1DB954" />
               <Text style={styles.loadingText}>Loading songs...</Text>
-      </View>
+            </View>
           ) : (
             <View style={styles.emptyContainer}>
               <Text style={styles.emptyText}>No songs found</Text>
@@ -696,12 +927,12 @@ export default function SongList() {
               </TouchableOpacity>
               <TouchableOpacity onPress={handleNextFromPlayer}>
                 <SkipForward size={24} color="#fff" />
-        </TouchableOpacity>
+              </TouchableOpacity>
               <TouchableOpacity onPress={toggleRepeatFromStore}>
                 <Repeat size={24} color={isRepeatFromStore ? '#1DB954' : '#b3b3b3'} />
-        </TouchableOpacity>
-      </View>
-    </View>
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
       )}
 
@@ -791,40 +1022,32 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
   list: {
-    padding: 20,
+    paddingBottom: 20,
+    paddingHorizontal: 0,
   },
   songItem: {
-    marginBottom: 12,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
     overflow: 'hidden',
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
   },
   activeSong: {
-    backgroundColor: 'rgba(29, 185, 84, 0.15)',
-    borderColor: '#1DB954',
-    transform: [{ scale: 1.02 }],
+    borderLeftWidth: 4,
+    borderLeftColor: '#1DB954',
+    paddingLeft: 12, // Compensate for the border to keep content alignment
   },
   songContent: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 12,
   },
   cover: {
-    width: 48,
-    height: 48,
+    width: 56,
+    height: 56,
     borderRadius: 8,
     backgroundColor: 'rgba(255, 255, 255, 0.1)',
   },
   songInfo: {
     flex: 1,
-    marginLeft: 12,
+    marginLeft: 16,
     marginRight: 8,
   },
   titleContainer: {
@@ -833,25 +1056,22 @@ const styles = StyleSheet.create({
   },
   title: {
     color: '#fff',
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '600',
-    marginBottom: 4,
+    marginBottom: 6,
   },
   artist: {
     color: '#b3b3b3',
-    fontSize: 13,
+    fontSize: 14,
   },
   songActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.2)',
-    borderRadius: 20,
-    padding: 4,
-    gap: 4,
+    gap: 12,
   },
   actionButton: {
-    padding: 6,
-    borderRadius: 12,
+    padding: 10,
+    borderRadius: 20,
     backgroundColor: 'rgba(255, 255, 255, 0.05)',
   },
   queueButtonActive: {
@@ -859,12 +1079,10 @@ const styles = StyleSheet.create({
   },
   playingIndicator: {
     flexDirection: 'row',
-    justifyContent: 'center',
+    justifyContent: 'flex-end',
     alignItems: 'center',
     paddingVertical: 8,
-    backgroundColor: 'rgba(29, 185, 84, 0.1)',
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(29, 185, 84, 0.2)',
+    paddingHorizontal: 16,
   },
   playingDot: {
     width: 4,
@@ -872,6 +1090,7 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: '#1DB954',
     marginHorizontal: 2,
+    opacity: 0.8,
   },
   loadingContainer: {
     flex: 1,
@@ -1153,5 +1372,100 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
+  },
+  endOfListContainer: {
+    paddingVertical: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  endOfListText: {
+    color: '#b3b3b3',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  divider: {
+    height: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    marginVertical: 2,
+  },
+  expandedMenu: {
+    flexDirection: 'row',
+    position: 'absolute',
+    top: 13,
+    right: 64, 
+    backgroundColor: 'rgba(25, 25, 25, 0.95)',
+    borderRadius: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    zIndex: 10,
+  },
+  menuItem: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 20,
+    width: 44,
+    height: 44,
+    backgroundColor: 'rgba(30, 30, 30, 0.6)',
+    elevation: 1,
+  },
+  tooltip: {
+    position: 'absolute',
+    top: -35,
+    left: -32, // Center the tooltip above the icon
+    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+    borderRadius: 4,
+    padding: 6,
+    minWidth: 100,
+    zIndex: 15,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 4,
+  },
+  tooltipText: {
+    color: '#fff',
+    fontSize: 12,
+    textAlign: 'center',
+    fontWeight: '500',
+  },
+  menuBackdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'transparent',
+    zIndex: 5,
+  },
+  actionButtonActive: {
+    backgroundColor: 'rgba(29, 185, 84, 0.1)',
+  },
+  listHeader: {
+    height: 10,
+  },
+  activeCover: {
+    borderWidth: 2,
+    borderColor: '#1DB954',
+  },
+  activeTitle: {
+    color: '#1DB954',
+    fontWeight: '700',
+  },
+  activeArtist: {
+    color: 'rgba(29, 185, 84, 0.7)',
   },
 });

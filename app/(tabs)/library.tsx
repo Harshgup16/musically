@@ -504,11 +504,11 @@ export default function LibraryScreen() {
             color={isSongDownloaded(item.id) ? '#1DB954' : '#b3b3b3'} 
           />
         </TouchableOpacity>
-        <TouchableOpacity 
+        {/* <TouchableOpacity 
           style={styles.actionButton} 
           onPress={() => handleAddSongToPlaylist(item)}>
           <ListMusic size={16} color="#1DB954" />
-        </TouchableOpacity>
+        </TouchableOpacity> */}
         <TouchableOpacity 
           style={[
             styles.actionButton,
@@ -522,39 +522,88 @@ export default function LibraryScreen() {
           )}
         </TouchableOpacity>
       </View>
-      {currentSongFromPlayer?.id === item.id && (
+      {/* {currentSongFromPlayer?.id === item.id && (
         <View style={styles.playingIndicator}>
           <View style={styles.playingDot} />
           <View style={styles.playingDot} />
           <View style={styles.playingDot} />
         </View>
-      )}
+      )} */}
     </TouchableOpacity>
   );
 
-  const renderPlaylist = ({ item }: { item: Playlist }) => (
-    <TouchableOpacity
-      style={styles.playlistItem}
-      onPress={() => {
-        setSelectedPlaylist(item);
-        setDisplayedPlaylistSongs(item.songs.slice(0, pageSize));
-        setShowPlaylistModal(true);
-      }}>
-      <FolderPlus size={24} color="#1DB954" />
-      <View style={styles.playlistInfo}>
-        <Text style={styles.playlistName}>{item.name}</Text>
-        <Text style={styles.playlistCount}>{item.songs.length} songs</Text>
-      </View>
-      <View style={styles.playlistActions}>
-        <TouchableOpacity
-          style={styles.playlistActionButton}
-          onPress={() => handleDeletePlaylist(item.id)}>
-          <Trash2 size={20} color="#FF4444" />
-        </TouchableOpacity>
-        <ChevronRight size={20} color="#b3b3b3" />
-      </View>
-    </TouchableOpacity>
-  );
+  const renderPlaylist = ({ item, index }: { item: Playlist; index: number }) => {
+    // Get a color based on index for a visually appealing card
+    const colors = [
+      '#8a2387', // Purple
+      '#11998e', // Teal
+      '#ff6b6b', // Red
+      '#fc5c7d', // Pink
+      '#6a82fb', // Blue
+      '#1DB954', // Green
+    ];
+    
+    // Use song cover if available or a default placeholder
+    const coverImage = item.songs.length > 0 && item.songs[0].cover_url
+      ? { uri: item.songs[0].cover_url } 
+      : { uri: 'https://via.placeholder.com/400/1a1a1a/1DB954?text=Playlist' };
+    
+    const cardColor = colors[index % colors.length];
+    
+    return (
+      <TouchableOpacity
+        style={[styles.playlistItem, { backgroundColor: cardColor + '20' }]} // 20 is hex for 12% opacity
+        onPress={() => {
+          setSelectedPlaylist(item);
+          setDisplayedPlaylistSongs(item.songs.slice(0, pageSize));
+          setShowPlaylistModal(true);
+        }}>
+        <View style={[{ height: 6, width: '100%', backgroundColor: cardColor }]} />
+        
+        <View style={{ width: '100%', aspectRatio: 1, backgroundColor: 'rgba(0, 0, 0, 0.2)' }}>
+          <Image 
+            source={coverImage} 
+            style={{ width: '100%', height: '100%' }}
+            resizeMode="cover" 
+          />
+        </View>
+        
+        <View style={{ padding: 12 }}>
+          <Text style={styles.playlistName}>{item.name}</Text>
+          <Text style={styles.playlistCount}>{item.songs.length} songs</Text>
+        </View>
+        
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 12, paddingBottom: 12 }}>
+          <TouchableOpacity
+            style={styles.playlistActionButton}
+            onPress={() => handleDeletePlaylist(item.id)}>
+            <Trash2 size={18} color="#FF4444" />
+          </TouchableOpacity>
+          
+          <TouchableOpacity 
+            style={[styles.playlistActionButton, { 
+              width: 36, 
+              height: 36, 
+              borderRadius: 18, 
+              justifyContent: 'center', 
+              alignItems: 'center', 
+              backgroundColor: cardColor 
+            }]}
+            onPress={() => {
+              if (item.songs.length > 0) {
+                clearQueueFromStore();
+                addToQueueFromStore(item.songs);
+                setCurrentPlaylistIdFromStore(item.id);
+                loadAndPlaySongFromPlayer(item.songs[0]);
+                console.log(`Adding ${item.songs.length} songs from playlist "${item.name}" to queue`);
+              }
+            }}>
+            <Play size={20} color="#FFFFFF" />
+          </TouchableOpacity>
+        </View>
+      </TouchableOpacity>
+    );
+  };
 
   const renderContent = () => {
     if (isLoading) {
@@ -692,7 +741,8 @@ export default function LibraryScreen() {
                 data={displayedPlaylists}
                 renderItem={renderPlaylist}
                 keyExtractor={(item) => item.id}
-                contentContainerStyle={styles.list}
+                contentContainerStyle={styles.gridList}
+                numColumns={2}
                 onEndReached={loadMoreItems}
                 onEndReachedThreshold={0.5}
                 ListFooterComponent={
@@ -887,6 +937,13 @@ const styles = StyleSheet.create({
   list: {
     padding: 20,
   },
+  gridList: {
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+  },
+  playlistRow: {
+    justifyContent: 'flex-start',
+  },
   songItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -945,11 +1002,16 @@ const styles = StyleSheet.create({
     marginHorizontal: 2,
   },
   playlistItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 15,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+    margin: 8,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    width: '45%',
   },
   playlistInfo: {
     flex: 1,
@@ -1139,5 +1201,61 @@ const styles = StyleSheet.create({
   headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
+  },
+  playlistCardItem: {
+    margin: 8,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    width: '44%',
+  },
+  playlistCardTopBar: {
+    height: 6,
+    width: '100%',
+  },
+  playlistCardCover: {
+    width: '100%',
+    aspectRatio: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.2)',
+  },
+  playlistCardCoverImage: {
+    width: '100%',
+    height: '100%',
+  },
+  playlistCardInfo: {
+    padding: 12,
+  },
+  playlistCardName: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  playlistCardCount: {
+    color: '#b3b3b3',
+    fontSize: 14,
+  },
+  playlistCardActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+  },
+  playlistCardActionButton: {
+    padding: 8,
+  },
+  playlistCardPlayButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#1DB954',
   },
 });
