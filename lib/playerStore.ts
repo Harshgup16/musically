@@ -3,6 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Song } from '@/lib/supabase';
 import { Audio, AVPlaybackStatus } from 'expo-av';
 import { useQueueStore } from './queueStore';
+import { AppState, AppStateStatus } from 'react-native';
 
 interface PlayerState {
   currentSong: Song | null;
@@ -12,6 +13,7 @@ interface PlayerState {
   sound: Audio.Sound | null;
   isLoading: boolean;
   error: string | null;
+  appState: AppStateStatus;
   loadAndPlaySong: (song: Song) => Promise<void>;
   togglePlayPause: () => Promise<void>;
   seekTo: (position: number) => Promise<void>;
@@ -20,6 +22,7 @@ interface PlayerState {
   setupAudio: () => Promise<void>;
   loadLastPlayedState: () => Promise<void>;
   saveLastPlayedState: () => Promise<void>;
+  handleAppStateChange: (nextAppState: AppStateStatus) => void;
 }
 
 export const usePlayerStore = create<PlayerState>((set, get) => ({
@@ -30,6 +33,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   sound: null,
   isLoading: false,
   error: null,
+  appState: AppState.currentState,
 
   setupAudio: async () => {
     try {
@@ -40,9 +44,64 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
         shouldDuckAndroid: true,
         playThroughEarpieceAndroid: false,
       });
+      
+      // Listen for app state changes
+      AppState.addEventListener('change', get().handleAppStateChange);
+      
     } catch (error) {
       console.error('Error setting up audio:', error);
       set({ error: 'Failed to initialize audio. Please restart the app.' });
+    }
+  },
+  
+  handleAppStateChange: async (nextAppState: AppStateStatus) => {
+    const previousState = get().appState;
+    set({ appState: nextAppState });
+    
+    console.log(`App state changed from ${previousState} to ${nextAppState}`);
+    
+    if (previousState === 'active' && nextAppState.match(/inactive|background/)) {
+      // App is going to background
+      console.log('App going to background, saving state');
+      const { sound, currentSong, isPlaying, playbackPosition } = get();
+      if (sound && currentSong && isPlaying) {
+        // Update our last position before going to background
+        const status = await sound.getStatusAsync();
+        if (status.isLoaded) {
+          set({ playbackPosition: status.positionMillis });
+          get().saveLastPlayedState();
+        }
+      }
+    } else if (previousState.match(/inactive|background/) && nextAppState === 'active') {
+      // App is coming to foreground
+      console.log('App coming to foreground, updating state');
+      const { sound, currentSong, isPlaying } = get();
+      if (sound && currentSong) {
+        // Get the latest status
+        const status = await sound.getStatusAsync();
+        if (status.isLoaded) {
+          // Update our position
+          set({ 
+            playbackPosition: status.positionMillis,
+            duration: status.durationMillis || 0,
+            isPlaying: status.isPlaying
+          });
+          
+          // Check if song should be playing but isn't
+          if (isPlaying && !status.isPlaying) {
+            sound.playAsync();
+          }
+          
+          // Check if song has finished while in background
+          if (status.didJustFinish || 
+              (status.positionMillis > 0 && 
+               status.durationMillis && 
+               status.positionMillis >= status.durationMillis - 500)) {
+            console.log('Song appears to have finished while in background');
+            get().handleNext();
+          }
+        }
+      }
     }
   },
 
@@ -61,7 +120,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
         if (song) {
           const { sound: newSound } = await Audio.Sound.createAsync(
             { uri: song.url },
-            { shouldPlay: wasPlaying },
+            { 
+              shouldPlay: wasPlaying,
+              progressUpdateIntervalMillis: 300, // More frequent updates for smoother UI
+            },
             (status: AVPlaybackStatus) => {
               if (status.isLoaded) {
                 set({ 
@@ -71,26 +133,86 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
 
                 // Handle song completion
                 if (status.didJustFinish) {
+                  console.log('Song finished playing naturally, handling next song');
                   const { isRepeat } = useQueueStore.getState();
                   if (isRepeat) {
                     // Replay the same song
-                    newSound.replayAsync();
+                    newSound.replayAsync().catch(err => 
+                      console.error('Error replaying song:', err)
+                    );
                   } else {
                     // Play next song
-                    get().handleNext();
+                    setTimeout(() => {
+                      get().handleNext().catch(err => 
+                        console.error('Error playing next song:', err)
+                      );
+                    }, 300);
                   }
                 }
               }
             }
           );
 
-          // Set up the sound to update position as it plays
+          // Set up a more comprehensive playback status check
+          let lastPosition = 0;
+          let stuckCounter = 0;
+          
           newSound.setOnPlaybackStatusUpdate((status: AVPlaybackStatus) => {
             if (status.isLoaded) {
+              const currentPosition = status.positionMillis;
+              const currentDuration = status.durationMillis || 0;
+              
               set({ 
-                playbackPosition: status.positionMillis,
-                duration: status.durationMillis || 0
+                playbackPosition: currentPosition,
+                duration: currentDuration,
+                isPlaying: status.isPlaying
               });
+
+              // Check for stuck playback
+              if (status.isPlaying && currentPosition === lastPosition && currentPosition > 0) {
+                stuckCounter++;
+                
+                // If position is stuck for several checks and we're near the end, consider it finished
+                if (stuckCounter >= 3 && currentDuration > 0 && 
+                    currentPosition >= currentDuration - 3000) {
+                  console.log('Playback appears stuck near the end, moving to next song');
+                  stuckCounter = 0;
+                  
+                  const { isRepeat } = useQueueStore.getState();
+                  if (isRepeat) {
+                    newSound.replayAsync().catch(err => 
+                      console.error('Error replaying stuck song:', err)
+                    );
+                  } else {
+                    get().handleNext().catch(err => 
+                      console.error('Error playing next after stuck song:', err)
+                    );
+                  }
+                }
+              } else {
+                stuckCounter = 0;
+              }
+              
+              // Double-check for song completion
+              if (status.didJustFinish || 
+                  (currentPosition > 0 && currentDuration > 0 && 
+                   currentPosition >= currentDuration - 1000 && !status.isPlaying)) {
+                console.log('Song completion detected in status update');
+                const { isRepeat } = useQueueStore.getState();
+                if (isRepeat) {
+                  // Replay the same song
+                  newSound.replayAsync().catch(err => 
+                    console.error('Error replaying completed song:', err)
+                  );
+                } else {
+                  // Play next song
+                  get().handleNext().catch(err => 
+                    console.error('Error playing next after completion:', err)
+                  );
+                }
+              }
+              
+              lastPosition = currentPosition;
             }
           });
 
@@ -141,7 +263,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
 
       const { sound: newSound } = await Audio.Sound.createAsync(
         { uri: song.url },
-        { shouldPlay: true },
+        { 
+          shouldPlay: true,
+          progressUpdateIntervalMillis: 300, // More frequent updates for smoother UI
+        },
         (status: AVPlaybackStatus) => {
           if (status.isLoaded) {
             set({ 
@@ -149,28 +274,89 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
               duration: status.durationMillis || 0
             });
 
-            // Handle song completion
+            // Handle song completion - this is called when a song naturally finishes
             if (status.didJustFinish) {
+              console.log('Song finished playing naturally, handling next song');
               const { isRepeat } = useQueueStore.getState();
               if (isRepeat) {
                 // Replay the same song
-                newSound.replayAsync();
+                newSound.replayAsync().catch(err => 
+                  console.error('Error replaying song:', err)
+                );
               } else {
-                // Play next song
-                get().handleNext();
+                // Play next song - use a small delay to ensure smooth transition
+                setTimeout(() => {
+                  get().handleNext().catch(err => 
+                    console.error('Error playing next song:', err)
+                  );
+                }, 300);
               }
             }
           }
         }
       );
 
-      // Set up the sound to update position as it plays
+      // Set up a more comprehensive playback status check to ensure we catch song completion
+      let lastPosition = 0;
+      let stuckCounter = 0;
+      
       newSound.setOnPlaybackStatusUpdate((status: AVPlaybackStatus) => {
         if (status.isLoaded) {
+          const currentPosition = status.positionMillis;
+          const currentDuration = status.durationMillis || 0;
+          
           set({ 
-            playbackPosition: status.positionMillis,
-            duration: status.durationMillis || 0
+            playbackPosition: currentPosition,
+            duration: currentDuration,
+            isPlaying: status.isPlaying
           });
+
+          // Check for stuck playback (position not changing when it should be playing)
+          if (status.isPlaying && currentPosition === lastPosition && currentPosition > 0) {
+            stuckCounter++;
+            console.log(`Playback position stuck at ${currentPosition}ms, counter: ${stuckCounter}`);
+            
+            // If position is stuck for several checks and we're near the end, consider it finished
+            if (stuckCounter >= 3 && currentDuration > 0 && 
+                currentPosition >= currentDuration - 3000) {
+              console.log('Playback appears stuck near the end, moving to next song');
+              stuckCounter = 0;
+              
+              const { isRepeat } = useQueueStore.getState();
+              if (isRepeat) {
+                newSound.replayAsync().catch(err => 
+                  console.error('Error replaying stuck song:', err)
+                );
+              } else {
+                get().handleNext().catch(err => 
+                  console.error('Error playing next after stuck song:', err)
+                );
+              }
+            }
+          } else {
+            stuckCounter = 0;
+          }
+          
+          // Double-check for song completion
+          if (status.didJustFinish || 
+              (currentPosition > 0 && currentDuration > 0 && 
+               currentPosition >= currentDuration - 1000 && !status.isPlaying)) {
+            console.log('Song completion detected in status update');
+            const { isRepeat } = useQueueStore.getState();
+            if (isRepeat) {
+              // Replay the same song
+              newSound.replayAsync().catch(err => 
+                console.error('Error replaying completed song:', err)
+              );
+            } else {
+              // Play next song
+              get().handleNext().catch(err => 
+                console.error('Error playing next after completion:', err)
+              );
+            }
+          }
+          
+          lastPosition = currentPosition;
         }
       });
 
@@ -233,10 +419,34 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   },
 
   handleNext: async () => {
-    const { currentSong } = get();
-    const nextSong = useQueueStore.getState().getNextSong(currentSong);
-    if (nextSong) {
-      await get().loadAndPlaySong(nextSong);
+    try {
+      const { currentSong } = get();
+      const nextSong = useQueueStore.getState().getNextSong(currentSong);
+      
+      console.log('Handling next song:', nextSong ? nextSong.title : 'No next song');
+      
+      if (nextSong) {
+        // Pre-update UI state for immediate feedback
+        set({ 
+          isLoading: true,
+          currentSong: nextSong 
+        });
+        
+        await get().loadAndPlaySong(nextSong);
+      } else {
+        // If no next song, just stop
+        const { sound } = get();
+        if (sound) {
+          await sound.pauseAsync();
+          await sound.setPositionAsync(0);
+          set({ 
+            isPlaying: false,
+            playbackPosition: 0
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Error handling next song:', error);
     }
   },
 
