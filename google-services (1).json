@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "941977233141",
+    "project_id": "song-demo-d9a7a",
+    "storage_bucket": "song-demo-d9a7a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:941977233141:android:e14334be3b54d12d3e87bc",
+        "android_client_info": {
+          "package_name": "com.musicallydemo.harsh"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBjVJO1pglUBr_5kkKoMAvDd1AQXAVZcpA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

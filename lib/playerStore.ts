@@ -4,6 +4,16 @@ import { Song } from '@/lib/supabase';
 import { Audio, AVPlaybackStatus } from 'expo-av';
 import { useQueueStore } from './queueStore';
 import { AppState, AppStateStatus } from 'react-native';
+import { ref, set as firebaseSet, onValue, off } from 'firebase/database';
+import { database } from './firebase';
+
+// Track if we're in a room
+let currentRoomId: string | null = null;
+
+// Function to set the current room ID
+export const setCurrentRoomId = (roomId: string | null) => {
+  currentRoomId = roomId;
+};
 
 interface PlayerState {
   currentSong: Song | null;
@@ -23,6 +33,9 @@ interface PlayerState {
   loadLastPlayedState: () => Promise<void>;
   saveLastPlayedState: () => Promise<void>;
   handleAppStateChange: (nextAppState: AppStateStatus) => void;
+  updateRoomPlayback: (roomId: string) => Promise<void>;
+  joinRoom: (roomId: string) => Promise<void>;
+  leaveRoom: () => void;
 }
 
 export const usePlayerStore = create<PlayerState>((set, get) => ({
@@ -274,6 +287,25 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
               duration: status.durationMillis || 0
             });
 
+            // Update Firebase if we're in a room
+            if (currentRoomId) {
+              const roomRef = ref(database, `rooms/${currentRoomId}`);
+              const updateData = {
+                currentSong: {
+                  url: song.url,
+                  title: song.title,
+                  artist: song.artist,
+                },
+                isPlaying: true,
+                currentTime: status.positionMillis,
+                lastUpdated: Date.now(),
+              };
+              
+              firebaseSet(roomRef, updateData).catch((error: Error) => 
+                console.error('Error updating room playback:', error)
+              );
+            }
+
             // Handle song completion - this is called when a song naturally finishes
             if (status.didJustFinish) {
               console.log('Song finished playing naturally, handling next song');
@@ -378,43 +410,74 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   },
 
   togglePlayPause: async () => {
-    const { sound, currentSong, isPlaying } = get();
-    if (!sound || !currentSong) return;
-
-    // Update UI state immediately for instant feedback
-    const newPlayingState = !isPlaying;
-    set({ isPlaying: newPlayingState });
-    
-    // Fire and forget - don't await the audio operations
-    // This prevents UI lag while audio system responds
-    if (newPlayingState) {
-      sound.playAsync().catch(error => {
-        console.error('Error playing audio:', error);
-        // Only revert UI state if there's an error
-        set({ isPlaying: isPlaying });
-      });
-    } else {
-      sound.pauseAsync().catch(error => {
-        console.error('Error pausing audio:', error);
-        // Only revert UI state if there's an error
-        set({ isPlaying: isPlaying });
-      });
+    try {
+      const { sound, isPlaying, currentSong } = get();
+      
+      if (!sound || !currentSong) return;
+      
+      if (isPlaying) {
+        await sound.pauseAsync();
+        set({ isPlaying: false });
+        
+        // Update Firebase if we're in a room
+        if (currentRoomId) {
+          const roomRef = ref(database, `rooms/${currentRoomId}`);
+          const updateData = {
+            isPlaying: false,
+            lastUpdated: Date.now(),
+          };
+          
+          firebaseSet(roomRef, updateData).catch((error: Error) => 
+            console.error('Error updating room playback state:', error)
+          );
+        }
+      } else {
+        await sound.playAsync();
+        set({ isPlaying: true });
+        
+        // Update Firebase if we're in a room
+        if (currentRoomId) {
+          const roomRef = ref(database, `rooms/${currentRoomId}`);
+          const updateData = {
+            isPlaying: true,
+            lastUpdated: Date.now(),
+          };
+          
+          firebaseSet(roomRef, updateData).catch((error: Error) => 
+            console.error('Error updating room playback state:', error)
+          );
+        }
+      }
+    } catch (error) {
+      console.error('Error toggling play/pause:', error);
+      set({ error: 'Failed to toggle playback' });
     }
-    
-    // Save state in the background
-    get().saveLastPlayedState();
   },
 
   seekTo: async (position: number) => {
-    const { sound } = get();
-    if (!sound) return;
-    
     try {
+      const { sound, currentSong } = get();
+      
+      if (!sound || !currentSong) return;
+      
       await sound.setPositionAsync(position);
       set({ playbackPosition: position });
-      get().saveLastPlayedState();
+      
+      // Update Firebase if we're in a room
+      if (currentRoomId) {
+        const roomRef = ref(database, `rooms/${currentRoomId}`);
+        const updateData = {
+          currentTime: position,
+          lastUpdated: Date.now(),
+        };
+        
+        firebaseSet(roomRef, updateData).catch((error: Error) => 
+          console.error('Error updating room playback position:', error)
+        );
+      }
     } catch (error) {
       console.error('Error seeking:', error);
+      set({ error: 'Failed to seek' });
     }
   },
 
@@ -443,6 +506,20 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
             isPlaying: false,
             playbackPosition: 0
           });
+          
+          // Update Firebase if we're in a room
+          if (currentRoomId) {
+            const roomRef = ref(database, `rooms/${currentRoomId}`);
+            const updateData = {
+              isPlaying: false,
+              currentTime: 0,
+              lastUpdated: Date.now(),
+            };
+            
+            firebaseSet(roomRef, updateData).catch((error: Error) => 
+              console.error('Error updating room playback state:', error)
+            );
+          }
         }
       }
     } catch (error) {
@@ -455,6 +532,122 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     const previousSong = useQueueStore.getState().getPreviousSong(currentSong);
     if (previousSong) {
       await get().loadAndPlaySong(previousSong);
+    }
+  },
+
+  // New method to update room playback
+  updateRoomPlayback: async (roomId: string) => {
+    try {
+      const { currentSong, isPlaying, playbackPosition } = get();
+      
+      if (!currentSong) return;
+      
+      const roomRef = ref(database, `rooms/${roomId}`);
+      const updateData = {
+        currentSong: {
+          url: currentSong.url,
+          title: currentSong.title,
+          artist: currentSong.artist,
+        },
+        isPlaying,
+        currentTime: playbackPosition,
+        lastUpdated: Date.now(),
+      };
+      
+      firebaseSet(roomRef, updateData).catch((error: Error) => 
+        console.error('Error updating room playback:', error)
+      );
+    } catch (error) {
+      console.error('Error updating room playback:', error);
+    }
+  },
+
+  // New method to join a room
+  joinRoom: async (roomId: string) => {
+    try {
+      // Set the current room ID
+      setCurrentRoomId(roomId);
+      
+      // Get room data from Firebase
+      const roomRef = ref(database, `rooms/${roomId}`);
+      
+      // Listen for room updates
+      onValue(roomRef, (snapshot) => {
+        const roomData = snapshot.val();
+        if (!roomData) {
+          console.log("Room data not found");
+          return;
+        }
+        
+        const { currentSong, isPlaying, currentTime, lastUpdated } = roomData;
+        
+        // Add comprehensive null check for currentSong and its properties
+        if (currentSong && typeof currentSong === 'object' && 
+            'url' in currentSong && typeof currentSong.url === 'string' && 
+            'title' in currentSong && typeof currentSong.title === 'string' && 
+            'artist' in currentSong && typeof currentSong.artist === 'string') {
+          
+          // Check if we need to load a new song (either no current song or different URL)
+          const currentPlayerSong = get().currentSong;
+          if (!currentPlayerSong || currentPlayerSong.url !== currentSong.url) {
+            // At this point, we know currentSong is not null and has the required properties
+            const songData = currentSong as { url: string; title: string; artist: string; cover_url?: string; duration?: number };
+            const song: Song = {
+              id: Date.now().toString(), // Generate a temporary ID
+              url: songData.url,
+              title: songData.title,
+              artist: songData.artist,
+              cover_url: songData.cover_url || '',
+              duration: songData.duration || 0,
+              created_at: new Date().toISOString(),
+            };
+            
+            console.log(`Loading new song in room: ${song.title} by ${song.artist}`);
+            void get().loadAndPlaySong(song);
+          }
+        } else {
+          console.log("Current song data invalid or incomplete", currentSong);
+        }
+        
+        // If the playback state is different, update it
+        const playerState = get();
+        if (isPlaying !== undefined && isPlaying !== playerState.isPlaying) {
+          const { sound } = playerState;
+          if (sound) {
+            if (isPlaying) {
+              console.log("Syncing room - playing");
+              void sound.playAsync();
+            } else {
+              console.log("Syncing room - pausing");
+              void sound.pauseAsync();
+            }
+            set({ isPlaying });
+          }
+        }
+        
+        // If the position is significantly different, seek to it
+        if (currentTime !== undefined && Math.abs(currentTime - playerState.playbackPosition) > 1000) {
+          const { sound } = playerState;
+          if (sound) {
+            console.log(`Syncing room - seeking to ${currentTime}ms`);
+            void sound.setPositionAsync(currentTime);
+            set({ playbackPosition: currentTime });
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Error joining room:', error);
+      set({ error: 'Failed to join room' });
+    }
+  },
+
+  // New method to leave a room
+  leaveRoom: () => {
+    // Remove the Firebase listener
+    if (currentRoomId) {
+      const roomRef = ref(database, `rooms/${currentRoomId}`);
+      off(roomRef);
+      setCurrentRoomId(null);
     }
   },
 })); 
